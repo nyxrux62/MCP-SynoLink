@@ -56,10 +56,10 @@ Add this to your `claude_desktop_config.json`:
     "synolink": {
       "command": "node",
       "args": [
-        "/Users/doyoukim/Documents/MCP/SynoLink/dist/index.js",
-        "https://doboo.tplinkdns.com:5001",
-        "doyou135",
-        "password"
+        "/path/to/MCP-SynoLink/dist/index.js",
+        "https://your-synology-url:port",
+        "your-username",
+        "your-password"
       ]
     }
   }
@@ -86,9 +86,9 @@ Then add this to your `claude_desktop_config.json`:
         "-i",
         "--rm",
         "mcp/synolink",
-        "https://doboo.tplinkdns.com:5001",
-        "doyou135",
-        "password"
+        "https://your-synology-url:port",
+        "your-username",
+        "your-password"
       ]
     }
   }
