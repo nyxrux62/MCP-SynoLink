@@ -7,141 +7,215 @@ import {
   ListToolsRequestSchema,
   ToolSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import axios from "axios";
-import FormData from "form-data";
+import fs from "fs/promises";
+import path from "path";
+import os from 'os';
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
+import { diffLines, createTwoFilesPatch } from 'diff';
+import { minimatch } from 'minimatch';
+import axios from 'axios';
+import https from 'https';
+import FormData from 'form-data';
 
 // Command line argument parsing
 const args = process.argv.slice(2);
 if (args.length < 3) {
-  console.error("Usage: mcp-synolink <synology-url> <username> <password>");
+  console.error("Usage: synolink <synology-url> <username> <password> [api-version]");
+  console.error("Current arguments:", args);
   process.exit(1);
 }
 
-const SYNOLOGY_URL = args[0];
-const USERNAME = args[1];
-const PASSWORD = args[2];
+const [synoUrl, synoUsername, synoPassword] = args;
+const apiVersion = args[3] || '7';  // 기본값을 최신 DSM 버전으로 업데이트
 
-// Session ID storage
-let sid: string | null = null;
+// Synology DSM API configuration
+const dsm = {
+  baseUrl: synoUrl,
+  apiVersion: apiVersion,
+  account: synoUsername,
+  passwd: synoPassword,
+  sid: '',  // Session ID will be set after login
+  httpsAgent: new https.Agent({
+    rejectUnauthorized: false // Allow self-signed certificates
+  })
+};
+
+// Synology API utilities
+async function synoLogin() {
+  try {
+    console.error(`Attempting to login to ${dsm.baseUrl} with user ${dsm.account}...`);
+    
+    // 새로운 로그인 방식 (더 일반적인 DSM 7.x 양식)
+    const params = new URLSearchParams();
+    params.append('api', 'SYNO.API.Auth');
+    params.append('version', '3');
+    params.append('method', 'login');
+    params.append('account', dsm.account);
+    params.append('passwd', dsm.passwd);
+    params.append('session', 'FileStation');
+    params.append('format', 'sid');
+    
+    const loginUrl = `${dsm.baseUrl}/webapi/auth.cgi`;
+    
+    console.error(`Sending login request to ${loginUrl}`);
+    
+    const response = await axios.post(loginUrl, params, {
+      httpsAgent: dsm.httpsAgent
+    });
+    
+    console.error("Login response:", JSON.stringify(response.data));
+    
+    if (response.data && response.data.success) {
+      dsm.sid = response.data.data.sid;
+      console.error(`Login successful, got SID: ${dsm.sid.substring(0, 5)}...`);
+      return true;
+    } else {
+      console.error("Login failed:", response.data);
+      return false;
+    }
+  } catch (error: any) {
+    console.error("Login error:", error.message);
+    if (error.response) {
+      console.error("Error response data:", error.response.data);
+      console.error("Error response status:", error.response.status);
+    }
+    return false;
+  }
+}
+
+async function synoLogout() {
+  try {
+    if (!dsm.sid) return true;
+    
+    const params = new URLSearchParams();
+    params.append('api', 'SYNO.API.Auth');
+    params.append('version', '6');
+    params.append('method', 'logout');
+    params.append('session', 'FileStation');
+    params.append('_sid', dsm.sid);
+    
+    const logoutUrl = `${dsm.baseUrl}/webapi/entry.cgi`;
+    
+    console.error(`Attempting to logout from ${dsm.baseUrl}...`);
+    
+    const response = await axios.get(`${logoutUrl}?${params.toString()}`, {
+      httpsAgent: dsm.httpsAgent
+    });
+    
+    if (response.data && response.data.success) {
+      console.error("Logout successful");
+      dsm.sid = '';
+      return true;
+    } else {
+      console.error("Logout failed:", response.data);
+      return false;
+    }
+  } catch (error: any) {
+    console.error("Logout error:", error.message);
+    return false;
+  }
+}
+
+// Ensure we're logged in before starting the server
+async function ensureLogin() {
+  if (!dsm.sid) {
+    const loginSuccess = await synoLogin();
+    if (!loginSuccess) {
+      throw new Error("Failed to log in to Synology NAS");
+    }
+  }
+  return true;
+}
+
+// Refresh session if needed
+async function refreshSession() {
+  try {
+    // 먼저 간단히 현재 세션이 유효한지 확인
+    console.error("Checking if session is still valid...");
+    const infoUrl = `${dsm.baseUrl}/webapi/entry.cgi`;
+    
+    const params = new URLSearchParams();
+    params.append('api', 'SYNO.API.Info');
+    params.append('version', '1');
+    params.append('method', 'query');
+    params.append('query', 'SYNO.API.Auth');
+    params.append('_sid', dsm.sid);
+    
+    const response = await axios.get(`${infoUrl}?${params.toString()}`, {
+      httpsAgent: dsm.httpsAgent
+    });
+    
+    // If the request fails due to session timeout, login again
+    if (response.data && !response.data.success && response.data.error && response.data.error.code === 119) {
+      console.error("Session expired, logging in again...");
+      return await synoLogin();
+    }
+    
+    console.error("Session is still valid");
+    return true;
+  } catch (error: any) {
+    console.error("Session refresh error:", error.message);
+    console.error("Attempting to login again...");
+    return await synoLogin();
+  }
+}
+
+// Path utilities
+function formatSynoPath(filePath: string): string {
+  // Ensure path starts with /
+  if (!filePath.startsWith('/')) {
+    filePath = '/' + filePath;
+  }
+  
+  // Remove trailing slash except for root
+  if (filePath !== '/' && filePath.endsWith('/')) {
+    filePath = filePath.slice(0, -1);
+  }
+  
+  return filePath;
+}
+
+function normalizeLineEndings(text: string): string {
+  return text.replace(/\r\n/g, '\n');
+}
 
 // Schema definitions
-const LoginArgsSchema = z.object({});
+const ListSharesArgsSchema = z.object({});
 
-const LogoutArgsSchema = z.object({});
-
-const ListFoldersArgsSchema = z.object({
-  path: z.string().describe("Path to list files from, e.g., '/photos'"),
+const ListDirectoryArgsSchema = z.object({
+  path: z.string().describe('Path to list, must be absolute path with leading slash'),
 });
 
-const GetFileArgsSchema = z.object({
-  path: z.string().describe("Full path to the file on Synology NAS"),
+const ReadFileArgsSchema = z.object({
+  path: z.string().describe('Path to file, must be absolute path with leading slash'),
 });
 
-const UploadFileArgsSchema = z.object({
-  path: z.string().describe("Destination path on Synology NAS including filename"),
-  content: z.string().describe("Content of the file to upload"),
+const WriteFileArgsSchema = z.object({
+  path: z.string().describe('Path to file, must be absolute path with leading slash'),
+  content: z.string().describe('Content to write to the file'),
 });
 
-const CreateFolderArgsSchema = z.object({
-  path: z.string().describe("Full path to create folder at"),
-  name: z.string().describe("Name of the new folder"),
+const CreateDirectoryArgsSchema = z.object({
+  path: z.string().describe('Path to create, must be absolute path with leading slash'),
 });
 
-const DeleteItemArgsSchema = z.object({
-  path: z.string().describe("Full path to the file or folder to delete"),
+const SearchFilesArgsSchema = z.object({
+  path: z.string().describe('Path to search in, must be absolute path with leading slash'),
+  pattern: z.string().describe('Search pattern'),
 });
 
-const MoveItemArgsSchema = z.object({
-  source: z.string().describe("Full path to the source file or folder"),
-  destination: z.string().describe("Full path to the destination location"),
-});
-
-const SearchArgsSchema = z.object({
-  keyword: z.string().describe("Search keyword"),
-  path: z.string().describe("Path to search in").default("/"),
-});
-
-const GetShareLinksArgsSchema = z.object({
-  path: z.string().describe("Path to get share links for"),
-});
-
-const GetServerInfoArgsSchema = z.object({});
-
-const GetQuotaInfoArgsSchema = z.object({
-  volume: z.string().describe("Volume name").optional(),
+const GetFileInfoArgsSchema = z.object({
+  path: z.string().describe('Path to file, must be absolute path with leading slash'),
 });
 
 const ToolInputSchema = ToolSchema.shape.inputSchema;
 type ToolInput = z.infer<typeof ToolInputSchema>;
 
-interface FileInfo {
-  size: number;
-  created: Date;
-  modified: Date;
-  accessed: Date;
-  isDirectory: boolean;
-  isFile: boolean;
-  permissions: string;
-}
-
-// Helper functions
-async function login(): Promise<string> {
-  try {
-    if (sid) return sid;
-
-    const response = await axios.get(`${SYNOLOGY_URL}/webapi/auth.cgi`, {
-      params: {
-        api: 'SYNO.API.Auth',
-        version: '6',
-        method: 'login',
-        account: USERNAME,
-        passwd: PASSWORD,
-        session: 'FileStation',
-        format: 'sid'
-      }
-    });
-
-    if (response.data.success) {
-      sid = response.data.data.sid;
-      // Ensure we're returning a string (not null)
-      if (sid === null) {
-        throw new Error("Failed to get session ID");
-      }
-      return sid;
-    } else {
-      throw new Error(response.data.error?.code ? `Error ${response.data.error.code}` : "Login failed");
-    }
-  } catch (error) {
-    console.error('Login failed:', error);
-    throw new Error('Failed to authenticate with Synology NAS');
-  }
-}
-
-async function logout(): Promise<void> {
-  if (!sid) return;
-
-  try {
-    await axios.get(`${SYNOLOGY_URL}/webapi/auth.cgi`, {
-      params: {
-        api: 'SYNO.API.Auth',
-        version: '6',
-        method: 'logout',
-        session: 'FileStation',
-        _sid: sid
-      }
-    });
-    sid = null;
-  } catch (error) {
-    console.error('Logout failed:', error);
-  }
-}
-
 // Server setup
 const server = new Server(
   {
-    name: "synolink-server",
+    name: "synolink",
     version: "1.0.0",
   },
   {
@@ -151,69 +225,313 @@ const server = new Server(
   },
 );
 
-// Tool implementations
+// API Wrappers
+async function listShares() {
+  try {
+    await refreshSession();
+    
+    const url = `${dsm.baseUrl}/webapi/entry.cgi?api=SYNO.FileStation.List&version=2&method=list_share&_sid=${dsm.sid}`;
+    
+    const response = await axios.get(url, {
+      httpsAgent: dsm.httpsAgent
+    });
+    
+    if (response.data && response.data.success) {
+      return response.data.data.shares;
+    } else {
+      throw new Error(`Failed to list shares: ${response.data.error.code}`);
+    }
+  } catch (error) {
+    console.error("List shares error:", error);
+    throw error;
+  }
+}
+
+async function listDirectory(dirPath: string) {
+  try {
+    await refreshSession();
+    
+    const formattedPath = formatSynoPath(dirPath);
+    const url = `${dsm.baseUrl}/webapi/entry.cgi?api=SYNO.FileStation.List&version=2&method=list&folder_path=${encodeURIComponent(formattedPath)}&_sid=${dsm.sid}`;
+    
+    const response = await axios.get(url, {
+      httpsAgent: dsm.httpsAgent
+    });
+    
+    if (response.data && response.data.success) {
+      return response.data.data.files;
+    } else {
+      throw new Error(`Failed to list directory: ${response.data.error.code}`);
+    }
+  } catch (error) {
+    console.error("List directory error:", error);
+    throw error;
+  }
+}
+
+async function readFile(filePath: string) {
+  try {
+    await refreshSession();
+    
+    const formattedPath = formatSynoPath(filePath);
+    
+    // Get download info
+    const infoUrl = `${dsm.baseUrl}/webapi/entry.cgi?api=SYNO.FileStation.Download&version=2&method=download&path=${encodeURIComponent(formattedPath)}&mode=download&_sid=${dsm.sid}`;
+    
+    const response = await axios.get(infoUrl, {
+      httpsAgent: dsm.httpsAgent,
+      responseType: 'arraybuffer'
+    });
+    
+    // Convert to text
+    return new TextDecoder('utf-8').decode(response.data);
+  } catch (error) {
+    console.error("Read file error:", error);
+    throw error;
+  }
+}
+
+async function writeFile(filePath: string, content: string) {
+  try {
+    await refreshSession();
+    
+    const formattedPath = formatSynoPath(path.dirname(filePath));
+    const fileName = path.basename(filePath);
+    
+    // Create FormData object
+    const form = new FormData();
+    form.append('path', formattedPath);
+    form.append('create_parents', 'true');
+    form.append('overwrite', 'true');
+    
+    // Add file content as a buffer with the filename
+    const buffer = Buffer.from(content, 'utf-8');
+    form.append('file', buffer, { filename: fileName });
+    
+    // Upload URL
+    const uploadUrl = `${dsm.baseUrl}/webapi/entry.cgi?api=SYNO.FileStation.Upload&version=2&method=upload&_sid=${dsm.sid}`;
+    
+    const response = await axios.post(uploadUrl, form, {
+      httpsAgent: dsm.httpsAgent,
+      headers: form.getHeaders()
+    });
+    
+    if (response.data && response.data.success) {
+      return true;
+    } else {
+      throw new Error(`Failed to write file: ${response.data.error.code}`);
+    }
+  } catch (error) {
+    console.error("Write file error:", error);
+    throw error;
+  }
+}
+
+async function createDirectory(dirPath: string) {
+  try {
+    await refreshSession();
+    
+    const formattedPath = formatSynoPath(dirPath);
+    const parentPath = path.dirname(formattedPath);
+    const folderName = path.basename(formattedPath);
+    
+    const url = `${dsm.baseUrl}/webapi/entry.cgi`;
+    
+    const params = new URLSearchParams();
+    params.append('api', 'SYNO.FileStation.CreateFolder');
+    params.append('version', '2');
+    params.append('method', 'create');
+    params.append('folder_path', parentPath);
+    params.append('name', folderName);
+    params.append('create_parents', 'true');
+    params.append('_sid', dsm.sid);
+    
+    const response = await axios.post(url, params, {
+      httpsAgent: dsm.httpsAgent
+    });
+    
+    if (response.data && response.data.success) {
+      return true;
+    } else {
+      throw new Error(`Failed to create directory: ${response.data.error.code}`);
+    }
+  } catch (error) {
+    console.error("Create directory error:", error);
+    throw error;
+  }
+}
+
+async function searchFiles(searchPath: string, pattern: string) {
+  try {
+    await refreshSession();
+    
+    const formattedPath = formatSynoPath(searchPath);
+    
+    const url = `${dsm.baseUrl}/webapi/entry.cgi`;
+    
+    const params = new URLSearchParams();
+    params.append('api', 'SYNO.FileStation.Search');
+    params.append('version', '2');
+    params.append('method', 'start');
+    params.append('folder_path', formattedPath);
+    params.append('pattern', pattern);
+    params.append('_sid', dsm.sid);
+    
+    // Start search
+    const startResponse = await axios.post(url, params, {
+      httpsAgent: dsm.httpsAgent
+    });
+    
+    if (!startResponse.data || !startResponse.data.success) {
+      throw new Error(`Failed to start search: ${startResponse.data.error.code}`);
+    }
+    
+    const taskId = startResponse.data.data.taskid;
+    
+    // Function to check search status
+    const checkStatus = async () => {
+      const statusParams = new URLSearchParams();
+      statusParams.append('api', 'SYNO.FileStation.Search');
+      statusParams.append('version', '2');
+      statusParams.append('method', 'status');
+      statusParams.append('taskid', taskId);
+      statusParams.append('_sid', dsm.sid);
+      
+      const statusResponse = await axios.get(`${url}?${statusParams.toString()}`, {
+        httpsAgent: dsm.httpsAgent
+      });
+      
+      return statusResponse.data;
+    };
+    
+    // Wait for search to complete
+    let isFinished = false;
+    while (!isFinished) {
+      const status = await checkStatus();
+      if (!status.success) {
+        throw new Error(`Search status check failed: ${status.error.code}`);
+      }
+      
+      isFinished = status.data.finished;
+      if (!isFinished) {
+        // Wait before checking again
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+    }
+    
+    // Get search results
+    const resultParams = new URLSearchParams();
+    resultParams.append('api', 'SYNO.FileStation.Search');
+    resultParams.append('version', '2');
+    resultParams.append('method', 'list');
+    resultParams.append('taskid', taskId);
+    resultParams.append('_sid', dsm.sid);
+    
+    const resultResponse = await axios.get(`${url}?${resultParams.toString()}`, {
+      httpsAgent: dsm.httpsAgent
+    });
+    
+    if (!resultResponse.data || !resultResponse.data.success) {
+      throw new Error(`Failed to get search results: ${resultResponse.data.error.code}`);
+    }
+    
+    // Clean up the task
+    const cleanupParams = new URLSearchParams();
+    cleanupParams.append('api', 'SYNO.FileStation.Search');
+    cleanupParams.append('version', '2');
+    cleanupParams.append('method', 'stop');
+    cleanupParams.append('taskid', taskId);
+    cleanupParams.append('_sid', dsm.sid);
+    
+    await axios.post(url, cleanupParams, {
+      httpsAgent: dsm.httpsAgent
+    });
+    
+    return resultResponse.data.data.files;
+  } catch (error) {
+    console.error("Search files error:", error);
+    throw error;
+  }
+}
+
+async function getFileInfo(filePath: string) {
+  try {
+    await refreshSession();
+    
+    const formattedPath = formatSynoPath(filePath);
+    const url = `${dsm.baseUrl}/webapi/entry.cgi?api=SYNO.FileStation.List&version=2&method=getinfo&path=${encodeURIComponent(formattedPath)}&additional=time,size,owner,perm&_sid=${dsm.sid}`;
+    
+    const response = await axios.get(url, {
+      httpsAgent: dsm.httpsAgent
+    });
+    
+    if (response.data && response.data.success) {
+      return response.data.data.files[0];
+    } else {
+      throw new Error(`Failed to get file info: ${response.data.error.code}`);
+    }
+  } catch (error) {
+    console.error("Get file info error:", error);
+    throw error;
+  }
+}
+
+// Tool handlers
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
       {
-        name: "login",
-        description: "Login to Synology NAS",
-        inputSchema: zodToJsonSchema(LoginArgsSchema) as ToolInput,
+        name: "list_shares",
+        description:
+          "List all available shares on the Synology NAS. " +
+          "Returns information about each share including name, path, and description.",
+        inputSchema: zodToJsonSchema(ListSharesArgsSchema) as ToolInput,
       },
       {
-        name: "logout",
-        description: "Logout from Synology NAS",
-        inputSchema: zodToJsonSchema(LogoutArgsSchema) as ToolInput,
+        name: "list_directory",
+        description:
+          "List all files and folders in the specified directory on the Synology NAS. " +
+          "Returns detailed information about each item including name, type, size, " +
+          "and modification time. The path must be absolute with a leading slash.",
+        inputSchema: zodToJsonSchema(ListDirectoryArgsSchema) as ToolInput,
       },
       {
-        name: "list_folders",
-        description: "List files and folders in the specified path",
-        inputSchema: zodToJsonSchema(ListFoldersArgsSchema) as ToolInput,
+        name: "read_file",
+        description:
+          "Read the contents of a file from the Synology NAS. " +
+          "The path must be absolute with a leading slash.",
+        inputSchema: zodToJsonSchema(ReadFileArgsSchema) as ToolInput,
       },
       {
-        name: "get_file",
-        description: "Get the content of a file from Synology NAS",
-        inputSchema: zodToJsonSchema(GetFileArgsSchema) as ToolInput,
+        name: "write_file",
+        description:
+          "Write content to a file on the Synology NAS. Creates the file if it " +
+          "doesn't exist, otherwise overwrites it. The path must be absolute with a leading slash.",
+        inputSchema: zodToJsonSchema(WriteFileArgsSchema) as ToolInput,
       },
       {
-        name: "upload_file",
-        description: "Upload a file to Synology NAS",
-        inputSchema: zodToJsonSchema(UploadFileArgsSchema) as ToolInput,
+        name: "create_directory",
+        description:
+          "Create a new directory on the Synology NAS. Will create parent directories " +
+          "if they don't exist. The path must be absolute with a leading slash.",
+        inputSchema: zodToJsonSchema(CreateDirectoryArgsSchema) as ToolInput,
       },
       {
-        name: "create_folder",
-        description: "Create a new folder on Synology NAS",
-        inputSchema: zodToJsonSchema(CreateFolderArgsSchema) as ToolInput,
+        name: "search_files",
+        description:
+          "Search for files and directories on the Synology NAS. " +
+          "The search is performed recursively starting from the specified path. " +
+          "Returns all files and directories matching the pattern. " +
+          "The path must be absolute with a leading slash.",
+        inputSchema: zodToJsonSchema(SearchFilesArgsSchema) as ToolInput,
       },
       {
-        name: "delete_item",
-        description: "Delete a file or folder from Synology NAS",
-        inputSchema: zodToJsonSchema(DeleteItemArgsSchema) as ToolInput,
-      },
-      {
-        name: "move_item",
-        description: "Move or rename a file or folder on Synology NAS",
-        inputSchema: zodToJsonSchema(MoveItemArgsSchema) as ToolInput,
-      },
-      {
-        name: "search",
-        description: "Search for files and folders by keyword",
-        inputSchema: zodToJsonSchema(SearchArgsSchema) as ToolInput,
-      },
-      {
-        name: "get_share_links",
-        description: "Get sharing links for a file or folder",
-        inputSchema: zodToJsonSchema(GetShareLinksArgsSchema) as ToolInput,
-      },
-      {
-        name: "get_server_info",
-        description: "Get Synology server information",
-        inputSchema: zodToJsonSchema(GetServerInfoArgsSchema) as ToolInput,
-      },
-      {
-        name: "get_quota_info",
-        description: "Get quota information for the specified volume",
-        inputSchema: zodToJsonSchema(GetQuotaInfoArgsSchema) as ToolInput,
+        name: "get_file_info",
+        description:
+          "Get detailed information about a file or directory on the Synology NAS. " +
+          "Returns information such as size, permissions, creation time, " +
+          "and modification time. The path must be absolute with a leading slash.",
+        inputSchema: zodToJsonSchema(GetFileInfoArgsSchema) as ToolInput,
       },
     ],
   };
@@ -224,437 +542,111 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
 
     switch (name) {
-      case "login": {
-        const sessionId = await login();
+      case "list_shares": {
+        const shares = await listShares();
+        const formatted = shares.map((share: any) => ({
+          name: share.name,
+          path: share.path,
+          description: share.desc
+        }));
         return {
-          content: [{ type: "text", text: `Successfully logged in with session ID: ${sessionId}` }],
+          content: [{ type: "text", text: JSON.stringify(formatted, null, 2) }],
         };
       }
 
-      case "logout": {
-        await logout();
-        return {
-          content: [{ type: "text", text: "Successfully logged out" }],
-        };
-      }
-
-      case "list_folders": {
-        const parsed = ListFoldersArgsSchema.safeParse(args);
+      case "list_directory": {
+        const parsed = ListDirectoryArgsSchema.safeParse(args);
         if (!parsed.success) {
-          throw new Error(`Invalid arguments: ${parsed.error}`);
+          throw new Error(`Invalid arguments for list_directory: ${parsed.error}`);
         }
-
-        const sessionId = await login();
-        const response = await axios.get(`${SYNOLOGY_URL}/webapi/entry.cgi`, {
-          params: {
-            api: 'SYNO.FileStation.List',
-            version: '2',
-            method: 'list',
-            folder_path: parsed.data.path,
-            _sid: sessionId
-          }
-        });
-
-        if (!response.data.success) {
-          throw new Error(`Error ${response.data.error?.code}: ${response.data.error?.errors?.[0]?.message || 'Unknown error'}`);
-        }
-
-        const files = response.data.data.files;
-        let result = `Items in ${parsed.data.path}:\n`;
-
-        files.forEach((file: any) => {
-          const type = file.isdir ? "[DIR]" : "[FILE]";
-          result += `${type} ${file.name}\n`;
-        });
-
-        return {
-          content: [{ type: "text", text: result }],
-        };
-      }
-
-      case "get_file": {
-        const parsed = GetFileArgsSchema.safeParse(args);
-        if (!parsed.success) {
-          throw new Error(`Invalid arguments: ${parsed.error}`);
-        }
-
-        const sessionId = await login();
+        const files = await listDirectory(parsed.data.path);
         
-        // First get file info to check if it exists
-        const infoResponse = await axios.get(`${SYNOLOGY_URL}/webapi/entry.cgi`, {
-          params: {
-            api: 'SYNO.FileStation.List',
-            version: '2',
-            method: 'getinfo',
-            path: parsed.data.path,
-            _sid: sessionId
-          }
-        });
-
-        if (!infoResponse.data.success) {
-          throw new Error(`Error: File not found or cannot be accessed`);
-        }
-
-        // Then download the file
-        const fileResponse = await axios.get(`${SYNOLOGY_URL}/webapi/entry.cgi`, {
-          params: {
-            api: 'SYNO.FileStation.Download',
-            version: '2',
-            method: 'download',
-            path: parsed.data.path,
-            mode: 'open',
-            _sid: sessionId
-          },
-          responseType: 'text'
-        });
-
-        return {
-          content: [{ type: "text", text: fileResponse.data }],
-        };
-      }
-
-      case "upload_file": {
-        const parsed = UploadFileArgsSchema.safeParse(args);
-        if (!parsed.success) {
-          throw new Error(`Invalid arguments: ${parsed.error}`);
-        }
-
-        const sessionId = await login();
-        const form = new FormData();
-        const folderPath = parsed.data.path.substring(0, parsed.data.path.lastIndexOf('/'));
-        const fileName = parsed.data.path.substring(parsed.data.path.lastIndexOf('/') + 1);
-
-        form.append('filedata', Buffer.from(parsed.data.content), {
-          filename: fileName,
-          contentType: 'application/octet-stream',
-        });
+        const formatted = files.map((file: any) => ({
+          name: file.name,
+          type: file.isdir ? "directory" : "file",
+          size: file.size,
+          modified: file.time.mtime
+        }));
         
-        form.append('api', 'SYNO.FileStation.Upload');
-        form.append('version', '2');
-        form.append('method', 'upload');
-        form.append('path', folderPath);
-        form.append('create_parents', 'true');
-        form.append('overwrite', 'true');
-        form.append('_sid', sessionId);
-
-        const response = await axios.post(`${SYNOLOGY_URL}/webapi/entry.cgi`, form, {
-          headers: {
-            ...form.getHeaders(),
-          },
-        });
-
-        if (!response.data.success) {
-          throw new Error(`Upload failed: ${response.data.error?.code}`);
-        }
-
         return {
-          content: [{ type: "text", text: `Successfully uploaded file to ${parsed.data.path}` }],
+          content: [{ type: "text", text: JSON.stringify(formatted, null, 2) }],
         };
       }
 
-      case "create_folder": {
-        const parsed = CreateFolderArgsSchema.safeParse(args);
+      case "read_file": {
+        const parsed = ReadFileArgsSchema.safeParse(args);
         if (!parsed.success) {
-          throw new Error(`Invalid arguments: ${parsed.error}`);
+          throw new Error(`Invalid arguments for read_file: ${parsed.error}`);
         }
-
-        const sessionId = await login();
-        const response = await axios.get(`${SYNOLOGY_URL}/webapi/entry.cgi`, {
-          params: {
-            api: 'SYNO.FileStation.CreateFolder',
-            version: '2',
-            method: 'create',
-            folder_path: parsed.data.path,
-            name: parsed.data.name,
-            create_parents: 'true',
-            _sid: sessionId
-          }
-        });
-
-        if (!response.data.success) {
-          throw new Error(`Failed to create folder: ${response.data.error?.code}`);
-        }
-
+        const content = await readFile(parsed.data.path);
         return {
-          content: [{ type: "text", text: `Successfully created folder ${parsed.data.name} at ${parsed.data.path}` }],
+          content: [{ type: "text", text: content }],
         };
       }
 
-      case "delete_item": {
-        const parsed = DeleteItemArgsSchema.safeParse(args);
+      case "write_file": {
+        const parsed = WriteFileArgsSchema.safeParse(args);
         if (!parsed.success) {
-          throw new Error(`Invalid arguments: ${parsed.error}`);
+          throw new Error(`Invalid arguments for write_file: ${parsed.error}`);
         }
-
-        const sessionId = await login();
-        const response = await axios.get(`${SYNOLOGY_URL}/webapi/entry.cgi`, {
-          params: {
-            api: 'SYNO.FileStation.Delete',
-            version: '2',
-            method: 'delete',
-            path: parsed.data.path,
-            recursive: 'true',
-            _sid: sessionId
-          }
-        });
-
-        if (!response.data.success) {
-          throw new Error(`Failed to delete item: ${response.data.error?.code}`);
-        }
-
+        await writeFile(parsed.data.path, parsed.data.content);
         return {
-          content: [{ type: "text", text: `Successfully deleted ${parsed.data.path}` }],
+          content: [{ type: "text", text: `Successfully wrote to ${parsed.data.path}` }],
         };
       }
 
-      case "move_item": {
-        const parsed = MoveItemArgsSchema.safeParse(args);
+      case "create_directory": {
+        const parsed = CreateDirectoryArgsSchema.safeParse(args);
         if (!parsed.success) {
-          throw new Error(`Invalid arguments: ${parsed.error}`);
+          throw new Error(`Invalid arguments for create_directory: ${parsed.error}`);
         }
-
-        const sessionId = await login();
-        const destFolder = parsed.data.destination.substring(0, parsed.data.destination.lastIndexOf('/'));
-        const newName = parsed.data.destination.substring(parsed.data.destination.lastIndexOf('/') + 1);
-
-        const response = await axios.get(`${SYNOLOGY_URL}/webapi/entry.cgi`, {
-          params: {
-            api: 'SYNO.FileStation.Rename',
-            version: '2',
-            method: 'rename',
-            path: parsed.data.source,
-            dest_folder_path: destFolder,
-            name: newName,
-            _sid: sessionId
-          }
-        });
-
-        if (!response.data.success) {
-          throw new Error(`Failed to move/rename item: ${response.data.error?.code}`);
-        }
-
+        await createDirectory(parsed.data.path);
         return {
-          content: [{ type: "text", text: `Successfully moved ${parsed.data.source} to ${parsed.data.destination}` }],
+          content: [{ type: "text", text: `Successfully created directory ${parsed.data.path}` }],
         };
       }
 
-      case "search": {
-        const parsed = SearchArgsSchema.safeParse(args);
+      case "search_files": {
+        const parsed = SearchFilesArgsSchema.safeParse(args);
         if (!parsed.success) {
-          throw new Error(`Invalid arguments: ${parsed.error}`);
+          throw new Error(`Invalid arguments for search_files: ${parsed.error}`);
         }
-
-        const sessionId = await login();
-        const response = await axios.get(`${SYNOLOGY_URL}/webapi/entry.cgi`, {
-          params: {
-            api: 'SYNO.FileStation.Search',
-            version: '2',
-            method: 'start',
-            folder_path: parsed.data.path,
-            pattern: parsed.data.keyword,
-            _sid: sessionId
-          }
-        });
-
-        if (!response.data.success) {
-          throw new Error(`Search failed: ${response.data.error?.code}`);
-        }
-
-        const taskId = response.data.data.taskid;
+        const results = await searchFiles(parsed.data.path, parsed.data.pattern);
         
-        // Wait for search to complete
-        let isFinished = false;
-        let result = "";
+        const formatted = results.map((file: any) => ({
+          name: file.name,
+          path: file.path,
+          type: file.isdir ? "directory" : "file",
+          size: file.size
+        }));
         
-        while (!isFinished) {
-          await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second
-          
-          const statusResponse = await axios.get(`${SYNOLOGY_URL}/webapi/entry.cgi`, {
-            params: {
-              api: 'SYNO.FileStation.Search',
-              version: '2',
-              method: 'status',
-              taskid: taskId,
-              _sid: sessionId
-            }
-          });
-          
-          if (statusResponse.data.data.finished) {
-            isFinished = true;
-            
-            // Get search results
-            const resultResponse = await axios.get(`${SYNOLOGY_URL}/webapi/entry.cgi`, {
-              params: {
-                api: 'SYNO.FileStation.Search',
-                version: '2',
-                method: 'list',
-                taskid: taskId,
-                _sid: sessionId
-              }
-            });
-            
-            if (resultResponse.data.success) {
-              const files = resultResponse.data.data.files;
-              result = `Search results for "${parsed.data.keyword}" in ${parsed.data.path}:\n`;
-              
-              files.forEach((file: any) => {
-                const type = file.isdir ? "[DIR]" : "[FILE]";
-                result += `${type} ${file.path}\n`;
-              });
-              
-              if (files.length === 0) {
-                result += "No results found.\n";
-              }
-            }
-            
-            // Clean up the task
-            await axios.get(`${SYNOLOGY_URL}/webapi/entry.cgi`, {
-              params: {
-                api: 'SYNO.FileStation.Search',
-                version: '2',
-                method: 'stop',
-                taskid: taskId,
-                _sid: sessionId
-              }
-            });
-          }
-        }
-
         return {
-          content: [{ type: "text", text: result }],
+          content: [{ type: "text", text: JSON.stringify(formatted, null, 2) }],
         };
       }
 
-      case "get_share_links": {
-        const parsed = GetShareLinksArgsSchema.safeParse(args);
+      case "get_file_info": {
+        const parsed = GetFileInfoArgsSchema.safeParse(args);
         if (!parsed.success) {
-          throw new Error(`Invalid arguments: ${parsed.error}`);
+          throw new Error(`Invalid arguments for get_file_info: ${parsed.error}`);
         }
-
-        const sessionId = await login();
+        const info = await getFileInfo(parsed.data.path);
         
-        // First create a share link
-        const createResponse = await axios.get(`${SYNOLOGY_URL}/webapi/entry.cgi`, {
-          params: {
-            api: 'SYNO.FileStation.Sharing',
-            version: '3',
-            method: 'create',
-            path: parsed.data.path,
-            _sid: sessionId
-          }
-        });
-
-        if (!createResponse.data.success) {
-          throw new Error(`Failed to create share link: ${createResponse.data.error?.code}`);
-        }
-
-        // Then list all share links
-        const listResponse = await axios.get(`${SYNOLOGY_URL}/webapi/entry.cgi`, {
-          params: {
-            api: 'SYNO.FileStation.Sharing',
-            version: '3',
-            method: 'list',
-            _sid: sessionId
-          }
-        });
-
-        if (!listResponse.data.success) {
-          throw new Error(`Failed to list share links: ${listResponse.data.error?.code}`);
-        }
-
-        const links = listResponse.data.data.links;
-        let result = `Share links for ${parsed.data.path}:\n`;
-        
-        links.forEach((link: any) => {
-          if (link.path === parsed.data.path) {
-            result += `URL: ${link.url}\n`;
-            if (link.expire_time) {
-              const expireDate = new Date(link.expire_time * 1000);
-              result += `Expires: ${expireDate.toLocaleString()}\n`;
-            } else {
-              result += "No expiration date\n";
-            }
-          }
-        });
-
-        return {
-          content: [{ type: "text", text: result }],
+        const formatted = {
+          name: info.name,
+          path: info.path,
+          type: info.isdir ? "directory" : "file",
+          size: info.size,
+          owner: info.additional?.owner?.user || "unknown",
+          group: info.additional?.owner?.group || "unknown",
+          permissions: info.additional?.perm?.posix || "unknown",
+          created: info.additional?.time?.crtime || "unknown",
+          modified: info.additional?.time?.mtime || "unknown",
+          accessed: info.additional?.time?.atime || "unknown"
         };
-      }
-
-      case "get_server_info": {
-        const sessionId = await login();
-        const response = await axios.get(`${SYNOLOGY_URL}/webapi/entry.cgi`, {
-          params: {
-            api: 'SYNO.FileStation.Info',
-            version: '2',
-            method: 'get',
-            _sid: sessionId
-          }
-        });
-
-        if (!response.data.success) {
-          throw new Error(`Failed to get server info: ${response.data.error?.code}`);
-        }
-
-        const info = response.data.data;
-        let result = "Synology Server Information:\n";
-        result += `Hostname: ${info.hostname}\n`;
-        result += `DSM Version: ${info.version}\n`;
-        result += `Time: ${new Date(info.time * 1000).toLocaleString()}\n`;
-        result += `Filesystem support:\n`;
         
-        for (const [fs, supported] of Object.entries(info.support_virtual_protocol)) {
-          result += `  - ${fs}: ${supported ? "Yes" : "No"}\n`;
-        }
-
         return {
-          content: [{ type: "text", text: result }],
-        };
-      }
-
-      case "get_quota_info": {
-        const parsed = GetQuotaInfoArgsSchema.safeParse(args);
-        if (!parsed.success) {
-          throw new Error(`Invalid arguments: ${parsed.error}`);
-        }
-
-        const sessionId = await login();
-        const response = await axios.get(`${SYNOLOGY_URL}/webapi/entry.cgi`, {
-          params: {
-            api: 'SYNO.FileStation.Volume',
-            version: '1',
-            method: 'list',
-            _sid: sessionId
-          }
-        });
-
-        if (!response.data.success) {
-          throw new Error(`Failed to get quota info: ${response.data.error?.code}`);
-        }
-
-        const volumes = response.data.data.volumes;
-        let result = "Storage Volume Information:\n";
-        
-        volumes.forEach((volume: any) => {
-          if (!parsed.data.volume || volume.name === parsed.data.volume) {
-            result += `Volume: ${volume.name}\n`;
-            result += `  - Status: ${volume.status}\n`;
-            result += `  - File System: ${volume.filesystem}\n`;
-            
-            const totalSize = volume.total_size;
-            const freeSize = volume.free_size;
-            const usedSize = totalSize - freeSize;
-            const usedPercent = Math.round((usedSize / totalSize) * 100);
-            
-            result += `  - Total Size: ${formatBytes(totalSize)}\n`;
-            result += `  - Used: ${formatBytes(usedSize)} (${usedPercent}%)\n`;
-            result += `  - Free: ${formatBytes(freeSize)}\n`;
-          }
-        });
-
-        return {
-          content: [{ type: "text", text: result }],
+          content: [{ type: "text", text: JSON.stringify(formatted, null, 2) }],
         };
       }
 
@@ -670,38 +662,53 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
-// Helper function to format bytes to human-readable format
-function formatBytes(bytes: number, decimals = 2): string {
-  if (bytes === 0) return '0 Bytes';
+// Process termination handling
+process.on('SIGINT', async () => {
+  console.error("Received SIGINT signal, cleaning up...");
+  await synoLogout();
+  process.exit(0);
+});
 
-  const k = 1024;
-  const dm = decimals < 0 ? 0 : decimals;
-  const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
-
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
-}
+process.on('SIGTERM', async () => {
+  console.error("Received SIGTERM signal, cleaning up...");
+  await synoLogout();
+  process.exit(0);
+});
 
 // Start server
 async function runServer() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("Synology MCP Server running on stdio");
-  console.error(`Connected to: ${SYNOLOGY_URL}`);
+  try {
+    console.error("SynoLink MCP Server starting...");
+    console.error(`Connecting to Synology NAS at ${dsm.baseUrl}`);
+    console.error(`Using username: ${dsm.account}`);
+    console.error(`API version: ${dsm.apiVersion}`);
+    
+    // Login to Synology DSM
+    const loginSuccess = await synoLogin();
+    if (!loginSuccess) {
+      console.error("Failed to log in to Synology NAS. Check credentials and network connectivity.");
+      process.exit(1);
+    }
+    
+    console.error("Successfully logged in to Synology NAS");
+    
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+    console.error("SynoLink MCP Server running on stdio");
+    console.error(`Connected to Synology NAS at ${dsm.baseUrl}`);
+  } catch (error: any) {
+    console.error("Fatal error running server:", error);
+    if (error.response) {
+      console.error("Error response data:", error.response.data);
+      console.error("Error response status:", error.response.status);
+      console.error("Error response headers:", error.response.headers);
+    }
+    await synoLogout();
+    process.exit(1);
+  }
 }
 
 runServer().catch((error) => {
   console.error("Fatal error running server:", error);
   process.exit(1);
-});
-
-// Handle process exit to ensure logout
-process.on('exit', async () => {
-  await logout();
-});
-
-process.on('SIGINT', async () => {
-  await logout();
-  process.exit(0);
 });
