@@ -76,6 +76,16 @@ const GetQuotaInfoArgsSchema = z.object({
 const ToolInputSchema = ToolSchema.shape.inputSchema;
 type ToolInput = z.infer<typeof ToolInputSchema>;
 
+interface FileInfo {
+  size: number;
+  created: Date;
+  modified: Date;
+  accessed: Date;
+  isDirectory: boolean;
+  isFile: boolean;
+  permissions: string;
+}
+
 // Helper functions
 async function login(): Promise<string> {
   try {
@@ -95,6 +105,10 @@ async function login(): Promise<string> {
 
     if (response.data.success) {
       sid = response.data.data.sid;
+      // Ensure we're returning a string (not null)
+      if (sid === null) {
+        throw new Error("Failed to get session ID");
+      }
       return sid;
     } else {
       throw new Error(response.data.error?.code ? `Error ${response.data.error.code}` : "Login failed");
@@ -246,11 +260,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         const files = response.data.data.files;
-        let result = `Items in ${parsed.data.path}:\\n`;
+        let result = `Items in ${parsed.data.path}:\n`;
 
         files.forEach((file: any) => {
           const type = file.isdir ? "[DIR]" : "[FILE]";
-          result += `${type} ${file.name}\\n`;
+          result += `${type} ${file.name}\n`;
         });
 
         return {
@@ -481,15 +495,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             
             if (resultResponse.data.success) {
               const files = resultResponse.data.data.files;
-              result = `Search results for "${parsed.data.keyword}" in ${parsed.data.path}:\\n`;
+              result = `Search results for "${parsed.data.keyword}" in ${parsed.data.path}:\n`;
               
               files.forEach((file: any) => {
                 const type = file.isdir ? "[DIR]" : "[FILE]";
-                result += `${type} ${file.path}\\n`;
+                result += `${type} ${file.path}\n`;
               });
               
               if (files.length === 0) {
-                result += "No results found.\\n";
+                result += "No results found.\n";
               }
             }
             
@@ -549,16 +563,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         const links = listResponse.data.data.links;
-        let result = `Share links for ${parsed.data.path}:\\n`;
+        let result = `Share links for ${parsed.data.path}:\n`;
         
         links.forEach((link: any) => {
           if (link.path === parsed.data.path) {
-            result += `URL: ${link.url}\\n`;
+            result += `URL: ${link.url}\n`;
             if (link.expire_time) {
               const expireDate = new Date(link.expire_time * 1000);
-              result += `Expires: ${expireDate.toLocaleString()}\\n`;
+              result += `Expires: ${expireDate.toLocaleString()}\n`;
             } else {
-              result += "No expiration date\\n";
+              result += "No expiration date\n";
             }
           }
         });
@@ -584,14 +598,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         const info = response.data.data;
-        let result = "Synology Server Information:\\n";
-        result += `Hostname: ${info.hostname}\\n`;
-        result += `DSM Version: ${info.version}\\n`;
-        result += `Time: ${new Date(info.time * 1000).toLocaleString()}\\n`;
-        result += `Filesystem support:\\n`;
+        let result = "Synology Server Information:\n";
+        result += `Hostname: ${info.hostname}\n`;
+        result += `DSM Version: ${info.version}\n`;
+        result += `Time: ${new Date(info.time * 1000).toLocaleString()}\n`;
+        result += `Filesystem support:\n`;
         
         for (const [fs, supported] of Object.entries(info.support_virtual_protocol)) {
-          result += `  - ${fs}: ${supported ? "Yes" : "No"}\\n`;
+          result += `  - ${fs}: ${supported ? "Yes" : "No"}\n`;
         }
 
         return {
@@ -620,22 +634,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         const volumes = response.data.data.volumes;
-        let result = "Storage Volume Information:\\n";
+        let result = "Storage Volume Information:\n";
         
         volumes.forEach((volume: any) => {
           if (!parsed.data.volume || volume.name === parsed.data.volume) {
-            result += `Volume: ${volume.name}\\n`;
-            result += `  - Status: ${volume.status}\\n`;
-            result += `  - File System: ${volume.filesystem}\\n`;
+            result += `Volume: ${volume.name}\n`;
+            result += `  - Status: ${volume.status}\n`;
+            result += `  - File System: ${volume.filesystem}\n`;
             
             const totalSize = volume.total_size;
             const freeSize = volume.free_size;
             const usedSize = totalSize - freeSize;
             const usedPercent = Math.round((usedSize / totalSize) * 100);
             
-            result += `  - Total Size: ${formatBytes(totalSize)}\\n`;
-            result += `  - Used: ${formatBytes(usedSize)} (${usedPercent}%)\\n`;
-            result += `  - Free: ${formatBytes(freeSize)}\\n`;
+            result += `  - Total Size: ${formatBytes(totalSize)}\n`;
+            result += `  - Used: ${formatBytes(usedSize)} (${usedPercent}%)\n`;
+            result += `  - Free: ${formatBytes(freeSize)}\n`;
           }
         });
 
