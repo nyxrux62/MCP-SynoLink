@@ -46,6 +46,8 @@ npm run build
 
 ## Usage with Claude Desktop
 
+### Node.js Method
+
 Add this to your `claude_desktop_config.json`:
 
 ```json
@@ -55,6 +57,35 @@ Add this to your `claude_desktop_config.json`:
       "command": "node",
       "args": [
         "/Users/doyoukim/Documents/MCP/SynoLink/dist/index.js",
+        "https://doboo.tplinkdns.com:5001",
+        "doyou135",
+        "password"
+      ]
+    }
+  }
+}
+```
+
+### Docker Method
+
+Build the Docker image:
+
+```bash
+docker build -t mcp/synolink .
+```
+
+Then add this to your `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "synolink": {
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "mcp/synolink",
         "https://doboo.tplinkdns.com:5001",
         "doyou135",
         "password"
