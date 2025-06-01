@@ -252,7 +252,8 @@ async function listDirectory(dirPath: string) {
     await refreshSession();
     
     const formattedPath = formatSynoPath(dirPath);
-    const url = `${dsm.baseUrl}/webapi/entry.cgi?api=SYNO.FileStation.List&version=2&method=list&folder_path=${encodeURIComponent(formattedPath)}&_sid=${dsm.sid}`;
+    const additionalParams = "time,size";
+    const url = `${dsm.baseUrl}/webapi/entry.cgi?api=SYNO.FileStation.List&version=2&method=list&folder_path=${encodeURIComponent(formattedPath)}&additional=${encodeURIComponent(additionalParams)}&_sid=${dsm.sid}`;
     
     const response = await axios.get(url, {
       httpsAgent: dsm.httpsAgent
@@ -261,7 +262,7 @@ async function listDirectory(dirPath: string) {
     if (response.data && response.data.success) {
       return response.data.data.files;
     } else {
-      throw new Error(`Failed to list directory: ${response.data.error.code}`);
+      throw new Error(`Failed to list directory: ${response.data?.error?.code || 'Unknown error'}`);
     }
   } catch (error) {
     console.error("List directory error:", error);
@@ -564,8 +565,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const formatted = files.map((file: any) => ({
           name: file.name,
           type: file.isdir ? "directory" : "file",
-          size: file.size,
-          modified: file.time.mtime
+          size: file.additional?.size,
+          modified: file.additional?.time?.mtime
         }));
         
         return {
