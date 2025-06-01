@@ -226,7 +226,7 @@ const server = new Server(
 );
 
 // API Wrappers
-async function listShares() {
+async function syno_listShares() {
   try {
     await refreshSession();
     
@@ -247,7 +247,7 @@ async function listShares() {
   }
 }
 
-async function listDirectory(dirPath: string) {
+async function syno_listDirectory(dirPath: string) {
   try {
     await refreshSession();
     
@@ -270,7 +270,7 @@ async function listDirectory(dirPath: string) {
   }
 }
 
-async function readFile(filePath: string) {
+async function syno_readFile(filePath: string) {
   try {
     await refreshSession();
     
@@ -292,7 +292,7 @@ async function readFile(filePath: string) {
   }
 }
 
-async function writeFile(filePath: string, content: string) {
+async function syno_writeFile(filePath: string, content: string) {
   try {
     await refreshSession();
     
@@ -328,7 +328,7 @@ async function writeFile(filePath: string, content: string) {
   }
 }
 
-async function createDirectory(dirPath: string) {
+async function syno_createDirectory(dirPath: string) {
   try {
     await refreshSession();
     
@@ -362,7 +362,7 @@ async function createDirectory(dirPath: string) {
   }
 }
 
-async function searchFiles(searchPath: string, pattern: string) {
+async function syno_searchFiles(searchPath: string, pattern: string) {
   try {
     await refreshSession();
     
@@ -455,7 +455,7 @@ async function searchFiles(searchPath: string, pattern: string) {
   }
 }
 
-async function getFileInfo(filePath: string) {
+async function syno_getFileInfo(filePath: string) {
   try {
     await refreshSession();
     
@@ -482,14 +482,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
     tools: [
       {
-        name: "list_shares",
+        name: "syno_list_shares",
         description:
           "List all available shares on the Synology NAS. " +
           "Returns information about each share including name, path, and description.",
         inputSchema: zodToJsonSchema(ListSharesArgsSchema) as ToolInput,
       },
       {
-        name: "list_directory",
+        name: "syno_list_directory",
         description:
           "List all files and folders in the specified directory on the Synology NAS. " +
           "Returns detailed information about each item including name, type, size, " +
@@ -497,28 +497,28 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         inputSchema: zodToJsonSchema(ListDirectoryArgsSchema) as ToolInput,
       },
       {
-        name: "read_file",
+        name: "syno_read_file",
         description:
           "Read the contents of a file from the Synology NAS. " +
           "The path must be absolute with a leading slash.",
         inputSchema: zodToJsonSchema(ReadFileArgsSchema) as ToolInput,
       },
       {
-        name: "write_file",
+        name: "syno_write_file",
         description:
           "Write content to a file on the Synology NAS. Creates the file if it " +
           "doesn't exist, otherwise overwrites it. The path must be absolute with a leading slash.",
         inputSchema: zodToJsonSchema(WriteFileArgsSchema) as ToolInput,
       },
       {
-        name: "create_directory",
+        name: "syno_create_directory",
         description:
           "Create a new directory on the Synology NAS. Will create parent directories " +
           "if they don't exist. The path must be absolute with a leading slash.",
         inputSchema: zodToJsonSchema(CreateDirectoryArgsSchema) as ToolInput,
       },
       {
-        name: "search_files",
+        name: "syno_search_files",
         description:
           "Search for files and directories on the Synology NAS. " +
           "The search is performed recursively starting from the specified path. " +
@@ -527,7 +527,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         inputSchema: zodToJsonSchema(SearchFilesArgsSchema) as ToolInput,
       },
       {
-        name: "get_file_info",
+        name: "syno_get_file_info",
         description:
           "Get detailed information about a file or directory on the Synology NAS. " +
           "Returns information such as size, permissions, creation time, " +
@@ -543,8 +543,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
 
     switch (name) {
-      case "list_shares": {
-        const shares = await listShares();
+      case "syno_list_shares": {
+        const shares = await syno_listShares();
         const formatted = shares.map((share: any) => ({
           name: share.name,
           path: share.path,
@@ -555,12 +555,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
-      case "list_directory": {
+      case "syno_list_directory": {
         const parsed = ListDirectoryArgsSchema.safeParse(args);
         if (!parsed.success) {
           throw new Error(`Invalid arguments for list_directory: ${parsed.error}`);
         }
-        const files = await listDirectory(parsed.data.path);
+        const files = await syno_listDirectory(parsed.data.path);
         
         const formatted = files.map((file: any) => ({
           name: file.name,
@@ -574,45 +574,45 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
-      case "read_file": {
+      case "syno_read_file": {
         const parsed = ReadFileArgsSchema.safeParse(args);
         if (!parsed.success) {
           throw new Error(`Invalid arguments for read_file: ${parsed.error}`);
         }
-        const content = await readFile(parsed.data.path);
+        const content = await syno_readFile(parsed.data.path);
         return {
           content: [{ type: "text", text: content }],
         };
       }
 
-      case "write_file": {
+      case "syno_write_file": {
         const parsed = WriteFileArgsSchema.safeParse(args);
         if (!parsed.success) {
           throw new Error(`Invalid arguments for write_file: ${parsed.error}`);
         }
-        await writeFile(parsed.data.path, parsed.data.content);
+        await syno_writeFile(parsed.data.path, parsed.data.content);
         return {
           content: [{ type: "text", text: `Successfully wrote to ${parsed.data.path}` }],
         };
       }
 
-      case "create_directory": {
+      case "syno_create_directory": {
         const parsed = CreateDirectoryArgsSchema.safeParse(args);
         if (!parsed.success) {
           throw new Error(`Invalid arguments for create_directory: ${parsed.error}`);
         }
-        await createDirectory(parsed.data.path);
+        await syno_createDirectory(parsed.data.path);
         return {
           content: [{ type: "text", text: `Successfully created directory ${parsed.data.path}` }],
         };
       }
 
-      case "search_files": {
+      case "syno_search_files": {
         const parsed = SearchFilesArgsSchema.safeParse(args);
         if (!parsed.success) {
           throw new Error(`Invalid arguments for search_files: ${parsed.error}`);
         }
-        const results = await searchFiles(parsed.data.path, parsed.data.pattern);
+        const results = await syno_searchFiles(parsed.data.path, parsed.data.pattern);
         
         const formatted = results.map((file: any) => ({
           name: file.name,
@@ -626,12 +626,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
-      case "get_file_info": {
+      case "syno_get_file_info": {
         const parsed = GetFileInfoArgsSchema.safeParse(args);
         if (!parsed.success) {
           throw new Error(`Invalid arguments for get_file_info: ${parsed.error}`);
         }
-        const info = await getFileInfo(parsed.data.path);
+        const info = await syno_getFileInfo(parsed.data.path);
         
         const formatted = {
           name: info.name,
