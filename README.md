@@ -1,3 +1,5 @@
+> file system mcp와 동시 사용하기 위해 syno_ 접두어가 추가되었습니다.
+
 # SynoLink MCP Server
 
 A Node.js server implementing Model Context Protocol (MCP) for Synology NAS file operations. This server allows you to interact with your Synology NAS device through Claude or other compatible AI assistants.
