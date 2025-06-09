@@ -7,13 +7,9 @@ import {
   ListToolsRequestSchema,
   ToolSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import fs from "fs/promises";
 import path from "path";
-import os from 'os';
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
-import { diffLines, createTwoFilesPatch } from 'diff';
-import { minimatch } from 'minimatch';
 import axios from 'axios';
 import https from 'https';
 import FormData from 'form-data';
@@ -117,18 +113,6 @@ async function synoLogout() {
   }
 }
 
-// Ensure we're logged in before starting the server
-async function ensureLogin() {
-  if (!dsm.sid) {
-    const loginSuccess = await synoLogin();
-    if (!loginSuccess) {
-      throw new Error("Failed to log in to Synology NAS");
-    }
-  }
-  return true;
-}
-
-// Refresh session if needed
 async function refreshSession() {
   try {
     // 먼저 간단히 현재 세션이 유효한지 확인
@@ -207,6 +191,10 @@ const SearchFilesArgsSchema = z.object({
 
 const GetFileInfoArgsSchema = z.object({
   path: z.string().describe('Path to file, must be absolute path with leading slash'),
+});
+
+const CreateUploadRequestArgsSchema = z.object({
+  path: z.string().describe('Absolute path of the folder to create upload request (must start with slash)')
 });
 
 const ToolInputSchema = ToolSchema.shape.inputSchema;
@@ -534,6 +522,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           "and modification time. The path must be absolute with a leading slash.",
         inputSchema: zodToJsonSchema(GetFileInfoArgsSchema) as ToolInput,
       },
+      {
+        name: "syno_create_upload_request",
+        description: "Create or return a file upload request link for the specified folder on the Synology NAS. " +
+          "If the folder doesn't exist, it will be created first. " +
+          "The link can be used by others to upload files to this folder. " +
+          "Returns the URL of the upload request link.",
+        inputSchema: zodToJsonSchema(CreateUploadRequestArgsSchema) as ToolInput,
+      },
     ],
   };
 });
@@ -651,6 +647,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
 
+      case "syno_create_upload_request": {
+        const parsed = CreateUploadRequestArgsSchema.safeParse(args);
+        if (!parsed.success) {
+          throw new Error(`Invalid arguments for create_upload_request: ${parsed.error}`);
+        }
+        const url = await syno_createUploadRequest(parsed.data.path);
+        return {
+          content: [{ type: "text", text: url }],
+        };
+      }
+
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
@@ -713,3 +720,52 @@ runServer().catch((error) => {
   console.error("Fatal error running server:", error);
   process.exit(1);
 });
+
+// 3. 실제 구현 함수
+async function syno_createUploadRequest(folderPath: string) {
+  await refreshSession();
+  try {
+    await syno_createDirectory(folderPath);
+  } catch (e) {}
+  const url = `${dsm.baseUrl}/webapi/entry.cgi/SYNO.FileStation.Sharing`;
+  const headers = {
+    "X-Requested-With": "XMLHttpRequest",
+    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
+  };
+  const paramsList = new URLSearchParams();
+  paramsList.append('api', 'SYNO.FileStation.Sharing');
+  paramsList.append('method', 'list');
+  paramsList.append('version', '3');
+  paramsList.append('check_link_history', 'true');
+  paramsList.append('path', folderPath);
+  paramsList.append('sort_by', 'id');
+  paramsList.append('sort_direction', 'dec');
+  paramsList.append('filter_type', 'SYNO.SDS.App.SharingUpload.Application');
+  paramsList.append('_sid', dsm.sid);
+  let resp = await axios.post(url, paramsList, {
+    httpsAgent: dsm.httpsAgent,
+    headers
+  });
+  let data = resp.data;
+  if (data?.data?.links?.length > 0) {
+    return data.data.links[0].url;
+  }
+  const paramsCreate = new URLSearchParams();
+  paramsCreate.append('api', 'SYNO.FileStation.Sharing');
+  paramsCreate.append('method', 'create');
+  paramsCreate.append('version', '3');
+  paramsCreate.append('path', folderPath);
+  paramsCreate.append('file_request', 'true');
+  paramsCreate.append('request_name', 'File Request');
+  paramsCreate.append('request_info', 'File upload request');
+  paramsCreate.append('_sid', dsm.sid);
+  resp = await axios.post(url, paramsCreate, {
+    httpsAgent: dsm.httpsAgent,
+    headers
+  });
+  data = resp.data;
+  if (!data.success || !data.data?.links?.length) {
+    throw new Error("Failed to create upload request link: " + JSON.stringify(data));
+  }
+  return data.data.links[0].url;
+}

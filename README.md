@@ -2,6 +2,21 @@
 
 A Node.js server implementing Model Context Protocol (MCP) for Synology NAS file operations. This server allows you to interact with your Synology NAS device through Claude or other compatible AI assistants.
 
+## 수정 및 변경/추가 사항
+
+- "업로드 요청 링크" 생성 기능(`syno_create_upload_request`) 추가.
+  ```typescript
+  // 예시: '/photos' 폴더에 대한 업로드 요청 링크 생성
+  const result = await syno_create_upload_request({
+    path: '/photos'
+  });
+  // 반환값: 업로드 요청 URL 문자열
+  ```
+  - 지정된 폴더가 없는 경우 자동으로 생성됨
+  - 생성된 링크는 다른 사람들이 해당 폴더에 파일을 업로드하는데 사용 가능
+
+- filesystem mcp와 함께 사용할 때 비정상적으로 작동하는 문제 수정.
+
 ## Features
 
 - Login/logout to Synology DSM
