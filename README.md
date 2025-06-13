@@ -1,10 +1,10 @@
-# SynoLink MCP Server
+# Synol Mcp Server
 
-A Node.js server implementing Model Context Protocol (MCP) for Synology NAS file operations. This server allows you to interact with your Synology NAS device through Claude or other compatible AI assistants.
+Fork from [mcp/synolink](https://github.com/Do-Boo/MCP-SynoLink.git)
 
 ## 수정 및 변경/추가 사항
 
-- "업로드 요청 링크" 생성 기능(`syno_create_upload_request`) 추가.
+- "업로드 요청 링크" 생성(`syno_create_upload_request`)
   ```typescript
   // 예시: '/photos' 폴더에 대한 업로드 요청 링크 생성
   const result = await syno_create_upload_request({
@@ -38,30 +38,7 @@ A Node.js server implementing Model Context Protocol (MCP) for Synology NAS file
 - Synology NAS with DSM 6.0 or higher
 - Network access to your Synology NAS
 
-## Installation
-
-Clone this repository:
-
-```bash
-git clone https://github.com/Do-Boo/MCP-SynoLink.git
-cd MCP-SynoLink
-```
-
-Install dependencies:
-
-```bash
-npm install
-```
-
-Build the project:
-
-```bash
-npm run build
-```
-
 ## Usage with Claude Desktop
-
-### Node.js Method
 
 Add this to your `claude_desktop_config.json`:
 
@@ -69,9 +46,9 @@ Add this to your `claude_desktop_config.json`:
 {
   "mcpServers": {
     "synolink": {
-      "command": "node",
+      "command": "npx",
       "args": [
-        "/path/to/MCP-SynoLink/dist/index.js",
+        "@nyxrux62/synol-mcp",
         "https://your-synology-url:port",
         "your-username",
         "your-password"
@@ -80,39 +57,6 @@ Add this to your `claude_desktop_config.json`:
   }
 }
 ```
-
-### Docker Method
-
-Build the Docker image:
-
-```bash
-docker build -t mcp/synolink .
-```
-
-Then add this to your `claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "synolink": {
-      "command": "docker",
-      "args": [
-        "run",
-        "-i",
-        "--rm",
-        "mcp/synolink",
-        "https://your-synology-url:port",
-        "your-username",
-        "your-password"
-      ]
-    }
-  }
-}
-```
-
-### Security Note
-
-Always be careful with credentials. The current implementation sends the password as a command-line argument, which may be visible in process listings. For improved security in a production environment, consider implementing alternative authentication methods.
 
 ## API Documentation
 

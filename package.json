@@ -1,21 +1,36 @@
 {
-  "name": "mcp-synolink",
-  "version": "1.0.0",
-  "description": "MCP server for Synology NAS file operations",
+  "name": "@nyxrux62/synol-mcp",
+  "version": "2025.6.1",
+  "description": "MCP server for Synology NAS file operations with upload request functionality",
   "license": "MIT",
-  "author": "Do-Boo",
+  "author": "nyxrux62",
+  "contributors": [
+    "Do-Boo (original author)"
+  ],
   "type": "module",
   "bin": {
     "mcp-synolink": "dist/index.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md"
   ],
   "scripts": {
     "build": "tsc && chmod +x dist/index.js",
     "prepare": "npm run build",
     "start": "node dist/index.js",
     "watch": "tsc --watch"
+  },
+  "keywords": [
+    "mcp",
+    "synology",
+    "nas", 
+    "model-context-protocol",
+    "upload-request"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nyxrux62/MCP-SynoLink.git"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "0.5.0",
