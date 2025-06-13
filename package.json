@@ -1,6 +1,6 @@
 {
   "name": "@nyxrux62/synol-mcp",
-  "version": "2025.6.1",
+  "version": "2025.6.2",
   "description": "MCP server for Synology NAS file operations with upload request functionality",
   "license": "MIT",
   "author": "nyxrux62",
@@ -24,7 +24,7 @@
   "keywords": [
     "mcp",
     "synology",
-    "nas", 
+    "nas",
     "model-context-protocol",
     "upload-request"
   ],
