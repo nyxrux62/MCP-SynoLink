@@ -45,7 +45,7 @@ Add this to your `claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
-    "synolink": {
+    "synol-mcp": {
       "command": "npx",
       "args": [
         "@nyxrux62/synol-mcp",
